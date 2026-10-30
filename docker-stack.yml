@@ -1,0 +1,263 @@
+version: "3.8"
+
+x-flags: &penpot-flags
+  PENPOT_FLAGS: disable-email-verification enable-smtp enable-prepl-server disable-secure-session-cookies enable-mcp enable-admin-console
+
+x-uri: &penpot-public-uri
+  PENPOT_PUBLIC_URI: https://${PROXY_URL:?The PROXY_URL variable must be initialized}
+
+x-body-size: &penpot-http-body-size
+  PENPOT_HTTP_SERVER_MAX_BODY_SIZE: 367001600
+  PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: 367001600
+
+x-secret-key: &penpot-secret-key
+  PENPOT_SECRET_KEY: change-this-insecure-key
+
+x-database: &penpot-database
+  PENPOT_DATABASE_URI: postgresql://postgres/penpot
+  PENPOT_DATABASE_USERNAME: penpot
+  PENPOT_DATABASE_PASSWORD: penpot
+
+networks:
+  swarm-net:
+    external: true
+
+volumes:
+  PENPOT_POSTGRES:
+    name: PENPOT_POSTGRES
+    driver: local
+
+  PENPOT_ASSETS:
+    name: PENPOT_ASSETS
+    driver: local
+
+services:
+  frontend:
+    image: "penpotapp/frontend:${PENPOT_VERSION:-2.18}"
+    networks:
+      - swarm-net
+    volumes:
+      - type: volume
+        source: PENPOT_ASSETS
+        target: /opt/data/assets
+    depends_on:
+      - backend
+      - admin-console
+      - mcp
+      - exporter
+    environment:
+      << : [*penpot-flags, *penpot-http-body-size, *penpot-public-uri]
+      PENPOT_BACKEND_URI: http://backend:6060
+      PENPOT_EXPORTER_URI: http://exporter:6061
+      PENPOT_ADMIN_CONSOLE_URI: http://admin-console:3000
+      PENPOT_MCP_URI: http://mcp:4401
+      PENPOT_MCP_URI_WS: http://mcp:4402
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+      labels:
+        - "traefik.enable=true"
+        - "traefik.swarm.network=swarm-net"
+        - "traefik.http.routers.${STACK_NAME:?The STACK_NAME variable must be initialized}.entrypoints=websecure"
+        - "traefik.http.routers.${STACK_NAME:?The STACK_NAME variable must be initialized}.rule=Host(`${PROXY_URL:?The PROXY_URL variable must be initialized}`)"
+        - "traefik.http.routers.${STACK_NAME:?The STACK_NAME variable must be initialized}.tls=true"
+        - "traefik.http.services.${STACK_NAME:?The STACK_NAME variable must be initialized}.loadbalancer.server.port=8080"
+
+  backend:
+    image: "penpotapp/backend:${PENPOT_VERSION:-2.18}"
+    networks:
+      - swarm-net
+    volumes:
+      - type: volume
+        source: PENPOT_ASSETS
+        target: /opt/data/assets
+    depends_on:
+      - postgres
+      - valkey
+    environment:
+      << : [*penpot-flags, *penpot-public-uri, *penpot-http-body-size, *penpot-secret-key, *penpot-database]
+      PENPOT_ADMIN_CONSOLE_URI: http://admin-console:3000
+      PENPOT_REDIS_URI: redis://valkey/0
+      PENPOT_OBJECTS_STORAGE_BACKEND: fs
+      PENPOT_OBJECTS_STORAGE_FS_DIRECTORY: /opt/data/assets
+      PENPOT_TELEMETRY_ENABLED: "true"
+      PENPOT_TELEMETRY_REFERER: compose
+      PENPOT_SMTP_DEFAULT_FROM: no-reply@example.com
+      PENPOT_SMTP_DEFAULT_REPLY_TO: no-reply@example.com
+      PENPOT_SMTP_HOST: mailpit
+      PENPOT_SMTP_PORT: 1025
+      PENPOT_SMTP_USERNAME:
+      PENPOT_SMTP_PASSWORD:
+      PENPOT_SMTP_TLS: "false"
+      PENPOT_SMTP_SSL: "false"
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+
+  admin-console:
+    image: "penpotapp/admin-console:${PENPOT_VERSION:-2.18}"
+    networks:
+      - swarm-net
+    depends_on:
+      - postgres
+    environment:
+      << : [*penpot-public-uri, *penpot-secret-key, *penpot-database]
+      PENPOT_INTERNAL_URI: http://frontend:8080
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+
+  mcp:
+    image: "penpotapp/mcp:${PENPOT_VERSION:-2.18}"
+    networks:
+      - swarm-net
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+
+  exporter:
+    image: "penpotapp/exporter:${PENPOT_VERSION:-2.18}"
+    networks:
+      - swarm-net
+    depends_on:
+      - valkey
+    environment:
+      << : [*penpot-flags, *penpot-secret-key, *penpot-public-uri]
+      PENPOT_INTERNAL_URI: http://frontend:8080
+      PENPOT_REDIS_URI: redis://valkey/0
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+
+  postgres:
+    image: "postgres:15"
+    stop_signal: SIGINT
+    networks:
+      - swarm-net
+    volumes:
+      - type: volume
+        source: PENPOT_POSTGRES
+        target: /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U penpot"]
+      interval: 2s
+      timeout: 10s
+      retries: 5
+      start_period: 2s
+    environment:
+      - POSTGRES_INITDB_ARGS=--data-checksums
+      - POSTGRES_DB=penpot
+      - POSTGRES_USER=penpot
+      - POSTGRES_PASSWORD=penpot
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: stop-first
+        failure_action: rollback
+      placement:
+        constraints:
+          - node.role == manager
+
+  valkey:
+    image: "valkey/valkey:8.1"
+    networks:
+      - swarm-net
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ping | grep PONG"]
+      interval: 1s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+    environment:
+      - VALKEY_EXTRA_FLAGS=--maxmemory 128mb --maxmemory-policy volatile-lfu
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: stop-first
+        failure_action: rollback
+      placement:
+        constraints:
+          - node.role == manager
+
+  mailpit:
+    image: "axllent/mailpit:v1"
+    networks:
+      - swarm-net
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+      labels:
+        - "traefik.enable=true"
+        - "traefik.swarm.network=swarm-net"
+        - "traefik.http.routers.${STACK_NAME:?The STACK_NAME variable must be initialized}-mailpit.entrypoints=websecure"
+        - "traefik.http.routers.${STACK_NAME:?The STACK_NAME variable must be initialized}-mailpit.rule=Host(`mailpit-${PROXY_URL:?The PROXY_URL variable must be initialized}`)"
+        - "traefik.http.routers.${STACK_NAME:?The STACK_NAME variable must be initialized}-mailpit.tls=true"
+        - "traefik.http.services.${STACK_NAME:?The STACK_NAME variable must be initialized}-mailpit.loadbalancer.server.port=8025"
